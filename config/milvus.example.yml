@@ -1,0 +1,12 @@
+# Milvus 向量数据库配置示例
+# 复制此文件为 milvus.yml 并填入真实值
+data_path: data
+md5_hex_store: md5_hex.txt
+allowed_file_type: ["txt", "pdf"]
+
+collection_name: QA_agent
+k: 5
+alias: default
+host: 127.0.0.1
+port: 19530
+token: ""

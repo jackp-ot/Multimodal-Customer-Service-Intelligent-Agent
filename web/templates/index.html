@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Agent 智能助手</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app-layout">
+
+        <!-- ====== Sidebar ====== -->
+        <aside class="sidebar" id="sidebar">
+            <button class="new-chat-btn" onclick="newChat()">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                    <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
+                </svg>
+                新建对话
+            </button>
+
+            <div class="conv-list" id="convList">
+                <!-- populated by JS -->
+            </div>
+        </aside>
+
+        <!-- ====== Main Content ====== -->
+        <div class="main-content">
+
+            <header class="header">
+                <h1>AI Agent 智能助手</h1>
+                <p class="subtitle">基于 RAG 的智能问答系统</p>
+            </header>
+
+            <div class="chat-container" id="chatContainer">
+                <div class="welcome-message" id="welcomeMessage">
+                    <div class="avatar assistant-avatar">AI</div>
+                    <div class="message assistant-message">
+                        <p>你好！我是智能客服助手，可以回答关于产品使用、规格参数等方面的问题。</p>
+                        <p>请问有什么可以帮助你的？</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="input-area">
+                <div class="image-preview-container" id="imagePreviewContainer" style="display:none;">
+                    <div class="image-preview-list" id="imagePreviewList"></div>
+                </div>
+                <div class="input-row">
+                    <textarea
+                        id="queryInput"
+                        class="query-input"
+                        placeholder="请输入你的问题..."
+                        rows="1"
+                        autofocus
+                    ></textarea>
+                    <button id="uploadBtn" class="upload-btn" onclick="document.getElementById('imageInput').click()" title="上传图片">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                            <path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/>
+                        </svg>
+                    </button>
+                    <input type="file" id="imageInput" accept="image/jpeg,image/png,image/jpg" multiple style="display:none;">
+                    <button id="sendBtn" class="send-btn" onclick="sendMessage()">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <script>
+        // ====== State ======
+        const chatContainer = document.getElementById('chatContainer');
+        const queryInput = document.getElementById('queryInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const convList = document.getElementById('convList');
+        let currentConvId = null;
+        let isStreaming = false;
+        let currentAbortController = null;
+
+        // ====== Init ======
+        document.addEventListener('DOMContentLoaded', () => {
+            newChat();
+            loadConvList();
+        });
+
+        // Auto-resize textarea
+        queryInput.addEventListener('input', function() {
+            this.style.height = 'auto';
+            this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+        });
+
+        // Enter to send (Shift+Enter for newline)
+        queryInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        // ====== Sidebar: Conversation List ======
+        async function loadConvList() {
+            try {
+                const res = await fetch('/api/conversations');
+                const list = await res.json();
+                convList.innerHTML = '';
+                for (const conv of list) {
+                    const item = document.createElement('div');
+                    item.className = 'conv-item' + (conv.id === currentConvId ? ' active' : '');
+                    item.dataset.id = conv.id;
+
+                    const info = document.createElement('div');
+                    info.className = 'conv-item-info';
+                    info.onclick = () => switchConversation(conv.id);
+
+                    const title = document.createElement('div');
+                    title.className = 'conv-item-title';
+                    title.textContent = conv.title;
+
+                    const preview = document.createElement('div');
+                    preview.className = 'conv-item-preview';
+                    preview.textContent = conv.preview || '暂无消息';
+
+                    info.appendChild(title);
+                    info.appendChild(preview);
+
+                    const delBtn = document.createElement('button');
+                    delBtn.className = 'conv-item-del';
+                    delBtn.innerHTML = '&times;';
+                    delBtn.title = '删除对话';
+                    delBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        deleteConversation(conv.id);
+                    };
+
+                    item.appendChild(info);
+                    item.appendChild(delBtn);
+                    convList.appendChild(item);
+                }
+            } catch (e) {
+                // ignore
+            }
+        }
+
+        // ====== Conversation Management ======
+        async function newChat() {
+            try {
+                const res = await fetch('/api/conversations', { method: 'POST' });
+                const data = await res.json();
+                currentConvId = data.id;
+            } catch (e) {
+                currentConvId = 'temp_' + Date.now();
+            }
+            clearChat();
+            showWelcome();
+            loadConvList();
+            queryInput.focus();
+        }
+
+        async function switchConversation(convId) {
+            if (isStreaming && currentAbortController) {
+                currentAbortController.abort();
+            }
+            try {
+                const res = await fetch(`/api/conversations/${convId}`);
+                const conv = await res.json();
+                currentConvId = conv.id;
+                renderConversation(conv.messages);
+                loadConvList();
+            } catch (e) {
+                // fallback: just switch
+                currentConvId = convId;
+                loadConvList();
+            }
+            queryInput.focus();
+        }
+
+        async function deleteConversation(convId) {
+            try {
+                await fetch(`/api/conversations/${convId}`, { method: 'DELETE' });
+            } catch (e) { /* ignore */ }
+
+            if (currentConvId === convId) {
+                newChat();
+            } else {
+                loadConvList();
+            }
+        }
+
+        // ====== Image/Content Rendering ======
+        function renderMessageContent(text) {
+            // Escape HTML for safety
+            const escaped = text
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+
+            // Extract image array at the end: ["name1","name2"]
+            // Try with newline prefix first (standard format), fallback to inline
+            let imageNames = [];
+            let contentText = escaped;
+            let imgArrayMatch = escaped.match(/\n\s*(\[[\s\S]*?\])\s*$/);
+            if (!imgArrayMatch) {
+                // Also accept array at very end without preceding newline
+                imgArrayMatch = escaped.match(/(\[[\s\S]*?\])\s*$/);
+            }
+            if (imgArrayMatch) {
+                try {
+                    const parsed = JSON.parse(imgArrayMatch[1]);
+                    if (Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === 'string') {
+                        imageNames = parsed;
+                        contentText = escaped.slice(0, imgArrayMatch.index);
+                    }
+                } catch (e) {
+                    // not valid JSON, ignore
+                }
+            }
+
+            // Replace <PIC> sequentially with actual images from the array
+            let imgIndex = 0;
+            const withImages = contentText.replace(
+                /&lt;PIC&gt;/g,
+                () => {
+                    if (imgIndex < imageNames.length) {
+                        const name = encodeURIComponent(imageNames[imgIndex++].trim());
+                        return `<img src="/api/images/${name}" class="inline-image" alt="插图" loading="lazy" onclick="window.open(this.src)">`;
+                    }
+                    // Fallback: no more image names, show placeholder
+                    return '<span class="pic-placeholder" title="产品插图">📷</span>';
+                }
+            );
+
+            // Convert newlines to <br>
+            return withImages.replace(/\n/g, '<br>');
+        }
+
+        // ====== Chat Display ======
+        function clearChat() {
+            chatContainer.innerHTML = '';
+        }
+
+        function showWelcome() {
+            const welcome = document.createElement('div');
+            welcome.className = 'welcome-message';
+            welcome.id = 'welcomeMessage';
+            welcome.innerHTML = `
+                <div class="avatar assistant-avatar">AI</div>
+                <div class="message assistant-message">
+                    <p>你好！我是智能客服助手，可以回答关于产品使用、规格参数等方面的问题。</p>
+                    <p>请问有什么可以帮助你的？</p>
+                </div>
+            `;
+            chatContainer.appendChild(welcome);
+            scrollToBottom();
+        }
+
+        function renderConversation(messages) {
+            clearChat();
+            for (const msg of messages) {
+                addMessage(msg.content, msg.role, msg.images || null);
+            }
+            scrollToBottom();
+        }
+
+        function addMessage(content, role, images) {
+            const welcome = document.getElementById('welcomeMessage');
+            if (welcome) welcome.remove();
+
+            const msgDiv = document.createElement('div');
+            msgDiv.className = `message-row ${role}-row`;
+
+            const avatar = document.createElement('div');
+            avatar.className = `avatar ${role}-avatar`;
+            avatar.textContent = role === 'user' ? 'U' : 'AI';
+
+            const bubble = document.createElement('div');
+            bubble.className = `message ${role}-message`;
+
+            // Assistant messages may contain <PIC> markers for images
+            if (role === 'assistant') {
+                bubble.innerHTML = renderMessageContent(content);
+            } else {
+                // User message: show text (if any) and image thumbnails (if any)
+                if (content) {
+                    const textNode = document.createElement('div');
+                    textNode.textContent = content;
+                    bubble.appendChild(textNode);
+                }
+                if (images && images.length > 0) {
+                    const imgContainer = document.createElement('div');
+                    imgContainer.className = 'user-image-container';
+                    for (const imgData of images) {
+                        const img = document.createElement('img');
+                        img.src = imgData;
+                        img.className = 'user-uploaded-image';
+                        img.onclick = () => window.open(imgData);
+                        imgContainer.appendChild(img);
+                    }
+                    bubble.appendChild(imgContainer);
+                }
+            }
+
+            if (role === 'user') {
+                msgDiv.appendChild(bubble);
+                msgDiv.appendChild(avatar);
+            } else {
+                msgDiv.appendChild(avatar);
+                msgDiv.appendChild(bubble);
+            }
+
+            chatContainer.appendChild(msgDiv);
+            scrollToBottom();
+            return bubble;
+        }
+
+        function createStreamingMessage() {
+            const welcome = document.getElementById('welcomeMessage');
+            if (welcome) welcome.remove();
+
+            const msgDiv = document.createElement('div');
+            msgDiv.className = 'message-row assistant-row';
+
+            const avatar = document.createElement('div');
+            avatar.className = 'avatar assistant-avatar';
+            avatar.textContent = 'AI';
+
+            const bubble = document.createElement('div');
+            bubble.className = 'message assistant-message streaming';
+            bubble.innerHTML = '<span class="cursor">▍</span>';
+
+            msgDiv.appendChild(avatar);
+            msgDiv.appendChild(bubble);
+            chatContainer.appendChild(msgDiv);
+            scrollToBottom();
+            return bubble;
+        }
+
+        function scrollToBottom() {
+            setTimeout(() => {
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+            }, 50);
+        }
+
+        // ====== Image Upload ======
+        const imageInput = document.getElementById('imageInput');
+        const imagePreviewContainer = document.getElementById('imagePreviewContainer');
+        const imagePreviewList = document.getElementById('imagePreviewList');
+        let pendingImages = [];  // [{data: base64, name: string}]
+
+        imageInput.addEventListener('change', function(e) {
+            const files = e.target.files;
+            if (!files.length) return;
+
+            for (const file of files) {
+                if (!file.type.startsWith('image/')) continue;
+                if (file.size > 10 * 1024 * 1024) continue; // max 10MB per image
+
+                const reader = new FileReader();
+                reader.onload = function(ev) {
+                    const dataUrl = ev.target.result;
+                    pendingImages.push({ data: dataUrl, name: file.name });
+
+                    const previewItem = document.createElement('div');
+                    previewItem.className = 'image-preview-item';
+                    previewItem.dataset.index = pendingImages.length - 1;
+
+                    const img = document.createElement('img');
+                    img.src = dataUrl;
+                    img.className = 'preview-thumb';
+
+                    const removeBtn = document.createElement('button');
+                    removeBtn.className = 'preview-remove';
+                    removeBtn.innerHTML = '&times;';
+                    removeBtn.onclick = function() {
+                        const idx = parseInt(previewItem.dataset.index);
+                        pendingImages.splice(idx, 1);
+                        previewItem.remove();
+                        // Re-index remaining items
+                        document.querySelectorAll('.image-preview-item').forEach((el, i) => {
+                            el.dataset.index = i;
+                        });
+                        if (pendingImages.length === 0) {
+                            imagePreviewContainer.style.display = 'none';
+                        }
+                    };
+
+                    previewItem.appendChild(img);
+                    previewItem.appendChild(removeBtn);
+                    imagePreviewList.appendChild(previewItem);
+                    imagePreviewContainer.style.display = 'block';
+                };
+                reader.readAsDataURL(file);
+            }
+
+            // Reset input so same file can be selected again
+            imageInput.value = '';
+        });
+
+        // ====== Send Message ======
+        async function sendMessage() {
+            const query = queryInput.value.trim();
+            if ((!query && pendingImages.length === 0) || isStreaming) return;
+
+            // Ensure we have a conversation
+            if (!currentConvId) {
+                try {
+                    const res = await fetch('/api/conversations', { method: 'POST' });
+                    const data = await res.json();
+                    currentConvId = data.id;
+                    loadConvList();
+                } catch (e) {
+                    currentConvId = 'temp_' + Date.now();
+                }
+            }
+
+            // Collect images and clear pending
+            const imagesToSend = pendingImages.map(img => img.data);
+            pendingImages = [];
+            imagePreviewContainer.style.display = 'none';
+            imagePreviewList.innerHTML = '';
+
+            // Clear input
+            queryInput.value = '';
+            queryInput.style.height = 'auto';
+
+            // Show user message (with image thumbnails if any)
+            addMessage(query || '[图片]', 'user', imagesToSend);
+
+            // Create streaming bubble
+            const bubble = createStreamingMessage();
+            isStreaming = true;
+            sendBtn.disabled = true;
+            sendBtn.classList.add('disabled');
+
+            currentAbortController = new AbortController();
+
+            let fullContent = '';
+
+            try {
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        query,
+                        conversation_id: currentConvId,
+                        images: imagesToSend,
+                    }),
+                    signal: currentAbortController.signal,
+                });
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            const data = JSON.parse(line.slice(6));
+                            if (data.done) {
+                                break;
+                            } else if (data.error) {
+                                bubble.textContent = '错误: ' + data.error;
+                                bubble.classList.remove('streaming');
+                            } else if (data.content) {
+                                fullContent += data.content;
+                                bubble.innerHTML = renderMessageContent(fullContent) + '<span class="cursor">▍</span>';
+                                scrollToBottom();
+                            }
+                        }
+                    }
+                }
+
+                bubble.innerHTML = fullContent ? renderMessageContent(fullContent) : '';
+                bubble.classList.remove('streaming');
+
+                // Refresh conversation list (title may have updated)
+                loadConvList();
+
+            } catch (err) {
+                if (err.name === 'AbortError') {
+                    bubble.textContent = fullContent || '(已取消)';
+                } else {
+                    bubble.textContent = '连接出错，请重试';
+                }
+                bubble.classList.remove('streaming');
+            } finally {
+                isStreaming = false;
+                sendBtn.disabled = false;
+                sendBtn.classList.remove('disabled');
+                currentAbortController = null;
+                scrollToBottom();
+                queryInput.focus();
+            }
+        }
+    </script>
+</body>
+</html>

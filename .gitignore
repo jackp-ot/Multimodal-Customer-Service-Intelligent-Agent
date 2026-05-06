@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# uv
+uv.lock
+
+# Environment variables
+.env
+
+# Config files with secrets
+config/rag.yml
+config/agent.yml
+config/milvus.yml
+
+# Logs
+logs/
+*.log
+
+# Runtime data
+md5_hex.txt
+web/conversations.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data files (large binary files)
+data/插图/
+data/*.png
+data/*.jpg
+data/*.jpeg
+# 忽略根目录下的零散 txt（如输出文件）
+/*.txt
+
+# 但保留 data/ 下的产品手册（核心知识库）
+!data/*.txt
+
+# Jupyter
+.ipynb_checkpoints/
